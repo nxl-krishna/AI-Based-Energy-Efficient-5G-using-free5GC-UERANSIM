@@ -1,0 +1,52 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data & Results
+data/traffic_logs/*
+data/model_weights/*
+data/results/*
+*.log
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Model files
+*.h5
+*.pkl
+*.joblib
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+
+# OS specific
+Thumbs.db
+.directory
+
+# Project specific
+free5gc/
+ueransim/
+outputs/
+logs/
+
+# Environment variables
+.env
+.env.local
