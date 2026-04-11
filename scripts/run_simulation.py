@@ -12,7 +12,7 @@ import yaml
 from pathlib import Path
 
 # Import custom modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from traffic_monitoring.traffic_monitor import TrafficMonitor
 from ai_model.traffic_predictor import SimplePredictor
@@ -203,8 +203,10 @@ class SimulationRunner:
         summary = self.controller.get_status_summary()
         self.results['bs_states'].append(summary)
     
-    def save_results(self, output_dir: str = "../data/results/"):
+    def save_results(self, output_dir: str = None):
         """Save results to files for analysis"""
+        if output_dir is None:
+            output_dir = str(Path(__file__).parent.parent / 'data' / 'results')
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         

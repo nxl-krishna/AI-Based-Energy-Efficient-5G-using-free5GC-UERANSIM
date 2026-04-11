@@ -8,6 +8,17 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import logging
+import sys
+from pathlib import Path
+
+# Add src to path for imports
+if str(Path(__file__).parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from ueransim_integration.ueransim_controller import UERANSIMController
+except ImportError:
+    UERANSIMController = None
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +46,7 @@ class BaseStationController:
         self.num_bs = num_bs
         self.bs_states: Dict[int, BaseStationState] = {}
         self.transition_log: List[Dict] = []
+        self.ueransim = UERANSIMController() if UERANSIMController else None
         
         # Power consumption models (Watts)
         self.power_model = {
@@ -137,6 +149,14 @@ class BaseStationController:
         
         # Store target state internally
         setattr(self, f'_transition_target_{bs_id}', target)
+        
+        # Trigger Linux integration if applicable
+        if self.ueransim:
+            if target == "SLEEP":
+                self.ueransim.stop_gnb(bs_id)
+            elif target == "ON":
+                config_file = f"free5gc-gnb-{bs_id}.yaml"
+                self.ueransim.start_gnb(bs_id, config_file)
         
         self.transition_log.append({
             'timestamp': timestamp,

@@ -6,7 +6,7 @@ LSTM-based time series forecasting for 5G traffic
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional,Dict
 import json
 import logging
 

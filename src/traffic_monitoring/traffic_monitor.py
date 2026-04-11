@@ -32,6 +32,21 @@ class TrafficMetric:
     bs_energy: Dict[int, float] = field(default_factory=dict)  # BS_ID -> Power (W)
 
 
+import os
+import sys
+from pathlib import Path
+
+# Try to import Linux-specific collectors
+if str(Path(__file__).parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from free5gc_integration.metrics_collector import Free5GCMetricsCollector
+    from ueransim_integration.ue_simulator import UESimulator
+    HAS_LINUX_MODS = True
+except ImportError:
+    HAS_LINUX_MODS = False
+
 class TrafficMonitor:
     """
     Real-time traffic monitoring system
@@ -43,6 +58,15 @@ class TrafficMonitor:
         self.num_base_stations = num_bs
         self.metrics_history: List[TrafficMetric] = []
         self.start_time = datetime.now()
+        
+        # Initialize collectors if on Linux with modules
+        self.use_real_linux = HAS_LINUX_MODS and os.name != 'nt'
+        if self.use_real_linux:
+            self.free5gc_metrics = Free5GCMetricsCollector()
+            self.ue_simulator = UESimulator()
+            logger.info("Initialized real Linux telemetry collectors.")
+        else:
+            logger.info("Initializing mock telemetry simulation.")
         
     def collect_ueransim_metrics(self) -> Dict:
         """Collect metrics from UERANSIM simulation"""
@@ -77,6 +101,16 @@ class TrafficMonitor:
     
     def collect_free5gc_metrics(self) -> Dict:
         """Collect metrics from free5GC core network"""
+        
+        if self.use_real_linux:
+            throughput = self.free5gc_metrics.collect_throughput()
+            return {
+                'throughput_mbps': throughput,
+                'active_sessions': int(throughput * 2.5), # heuristic if true DB access isn't built
+                'amf_response_time_ms': np.random.uniform(10, 50),
+                'smf_response_time_ms': np.random.uniform(5, 20)
+            }
+            
         # In real implementation, this would query free5GC API
         
         ueransim_data = self.collect_ueransim_metrics()
