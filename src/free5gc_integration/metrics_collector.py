@@ -86,11 +86,19 @@ class Free5GCMetricsCollector:
             return 0.0
 
         try:
-            # Parse `ip -s link` output — byte counters are on lines 3 and 5 (0-indexed)
-            lines = result.stdout.split("\n")
-            rx_bytes = int(lines[3].strip().split()[0])
-            tx_bytes = int(lines[5].strip().split()[0])
-        except (IndexError, ValueError) as e:
+            lines = result.stdout.splitlines()
+            rx_bytes, tx_bytes = None, None
+
+            for i, line in enumerate(lines):
+                if "RX:" in line:
+                    rx_bytes = int(lines[i + 1].split()[0])
+                elif "TX:" in line:
+                    tx_bytes = int(lines[i + 1].split()[0])
+
+            if rx_bytes is None or tx_bytes is None:
+                raise ValueError("Could not find RX/TX bytes")
+
+        except Exception as e:
             logger.error(f"Failed to parse ip -s link output: {e}\nOutput:\n{result.stdout}")
             return 0.0
 
