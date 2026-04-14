@@ -1,12 +1,17 @@
 """
 AI Traffic Prediction Model
 LSTM-based time series forecasting for 5G traffic
+
+Also contains:
+  EnergyPredictor — sklearn-based regression model that predicts real
+  energy consumption (watts) from [UE, Throughput, CPU, Memory].
+  This uses RAPL-measured energy data as training labels.
 """
 
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional,Dict
+from typing import List, Tuple, Optional, Dict
 import json
 import logging
 
@@ -283,6 +288,187 @@ class SimplePredictor:
         }
 
 
+# ---------------------------------------------------------------------------
+# EnergyPredictor — Real RAPL-based energy regression model
+# ---------------------------------------------------------------------------
+
+try:
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
+    from sklearn.metrics import mean_absolute_error, r2_score
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+    logger.warning("scikit-learn not installed. EnergyPredictor unavailable. "
+                   "Install via: pip install scikit-learn")
+
+
+class EnergyPredictor:
+    """
+    Predicts system energy consumption (watts) from network/system features.
+
+    Features (X):  [UE_count, Throughput_Mbps, CPU_percent, Memory_percent]
+    Target   (y):  Energy in Watts (measured via Intel RAPL)
+
+    Also computes feature-engineered inputs:
+      CPU_per_UE        = CPU  / UE_count
+      Throughput_per_UE = Throughput / UE_count
+
+    Model: Ridge regression (regularised linear model — fast, interpretable,
+    suitable for the feature count).  Do NOT change the model type unless
+    you have enough data to justify a more complex model.
+    """
+
+    FEATURE_COLS = ["UE", "Throughput", "CPU", "Memory",
+                    "CPU_per_UE", "Throughput_per_UE"]
+    TARGET_COL   = "Energy"
+
+    def __init__(self, alpha: float = 1.0):
+        """
+        Args:
+            alpha: Ridge regularisation strength (default 1.0).
+        """
+        if not HAS_SKLEARN:
+            raise ImportError("scikit-learn is required for EnergyPredictor.")
+
+        self.alpha       = alpha
+        self.is_trained  = False
+        self.model       = Pipeline([
+            ("scaler", StandardScaler()),
+            ("ridge",  Ridge(alpha=self.alpha)),
+        ])
+
+    # ------------------------------------------------------------------
+    # Feature engineering
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def add_features(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add per-UE feature columns in-place.
+
+        Args:
+            df: DataFrame with columns UE, Throughput, CPU, Memory.
+
+        Returns:
+            DataFrame with added CPU_per_UE and Throughput_per_UE columns.
+        """
+        df = df.copy()
+        ue_safe              = df["UE"].replace(0, 1)  # avoid division by zero
+        df["CPU_per_UE"]        = df["CPU"]        / ue_safe
+        df["Throughput_per_UE"] = df["Throughput"] / ue_safe
+        return df
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
+    def train(self, df: pd.DataFrame) -> Dict:
+        """
+        Train the energy regression model on collected metrics.
+
+        Args:
+            df: DataFrame with columns:
+                  UE, Throughput, CPU, Memory, Energy
+                  (as produced by TrafficMonitor.get_recent_metrics())
+
+        Returns:
+            Dict with 'mae' and 'r2' on the training data.
+        """
+        df = self.add_features(df)
+
+        missing = [c for c in self.FEATURE_COLS + [self.TARGET_COL] if c not in df.columns]
+        if missing:
+            raise ValueError(f"Missing columns in training data: {missing}")
+
+        X = df[self.FEATURE_COLS].values
+        y = df[self.TARGET_COL].values
+
+        if len(X) < 5:
+            raise ValueError("Need at least 5 samples to train EnergyPredictor.")
+
+        self.model.fit(X, y)
+        self.is_trained = True
+
+        y_pred = self.model.predict(X)
+        metrics = {
+            "mae": float(mean_absolute_error(y, y_pred)),
+            "r2":  float(r2_score(y, y_pred)),
+            "n_samples": len(X),
+        }
+        logger.info(
+            f"EnergyPredictor trained on {len(X)} samples — "
+            f"MAE: {metrics['mae']:.4f} W, R²: {metrics['r2']:.4f}"
+        )
+        return metrics
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+
+    def predict(self, ue: float, throughput: float,
+                cpu: float, memory: float) -> float:
+        """
+        Predict energy consumption in Watts.
+
+        Args:
+            ue:         Number of active UEs.
+            throughput: UPF throughput in Mbps.
+            cpu:        Host CPU utilisation %.
+            memory:     Host memory utilisation %.
+
+        Returns:
+            Predicted power in Watts.
+        """
+        if not self.is_trained:
+            raise RuntimeError("EnergyPredictor is not trained. Call train() first.")
+
+        ue_safe      = ue if ue > 0 else 1
+        cpu_per_ue   = cpu        / ue_safe
+        tput_per_ue  = throughput / ue_safe
+
+        X = np.array([[ue, throughput, cpu, memory, cpu_per_ue, tput_per_ue]])
+        return float(self.model.predict(X)[0])
+
+    def predict_from_df(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Batch predict from a DataFrame with columns UE, Throughput, CPU, Memory.
+
+        Returns:
+            Array of predicted energy values (watts).
+        """
+        if not self.is_trained:
+            raise RuntimeError("EnergyPredictor is not trained. Call train() first.")
+
+        df = self.add_features(df)
+        X  = df[self.FEATURE_COLS].values
+        return self.model.predict(X)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, filepath: str) -> None:
+        """Save model to disk using joblib."""
+        import joblib
+        joblib.dump(self.model, filepath)
+        logger.info(f"EnergyPredictor saved to {filepath}")
+
+    def load(self, filepath: str) -> None:
+        """Load model from disk."""
+        import joblib
+        self.model      = joblib.load(filepath)
+        self.is_trained = True
+        logger.info(f"EnergyPredictor loaded from {filepath}")
+
+
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     # Example usage
     print("Traffic Prediction Module loaded")
+    if HAS_SKLEARN:
+        print("EnergyPredictor available (scikit-learn found).")
+    else:
+        print("EnergyPredictor unavailable — install scikit-learn.")

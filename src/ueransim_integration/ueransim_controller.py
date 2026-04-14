@@ -1,90 +1,175 @@
-import os
-import subprocess
+"""
+ueransim_controller.py
+----------------------
+Controls UERANSIM gNB and UE via Docker compose.
+
+Architecture:
+  - "ueransim-gnb"  container runs nr-gnb
+  - "ueransim-ue"   container runs nr-ue
+
+Both containers are managed independently via `docker compose up/stop`.
+No host-level UERANSIM binaries or config paths are needed.
+"""
+
 import logging
-import yaml
-from pathlib import Path
 from typing import List
+import sys
+from pathlib import Path
+
+# Make src/ importable when this module is run directly
+if str(Path(__file__).parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from docker_utils import run_docker_command, is_container_running
 
 logger = logging.getLogger(__name__)
 
+# Docker compose service names (must match docker-compose.yaml)
+GNB_SERVICE = "ueransim-gnb"
+UE_SERVICE  = "ueransim-ue"
+
+
 class UERANSIMController:
-    """Controls the actual nr-gnb instances on Linux."""
-    
-    def __init__(self, config_file: str = None):
-        self.config = {
-            'ueransim': {
-                'bin_path': '~/UERANSIM/build',
-                'config_path': '~/UERANSIM/config'
-            }
-        }
-        
-        # Load configuration
-        if config_file and Path(config_file).exists():
-            with open(config_file, 'r') as f:
-                loaded_config = yaml.safe_load(f)
-                if loaded_config and 'ueransim' in loaded_config:
-                    self.config['ueransim'].update(loaded_config['ueransim'])
+    """
+    Controls UERANSIM gNB and UE containers via docker compose.
 
-        self.bin_path = os.path.expanduser(self.config['ueransim']['bin_path'])
-        self.config_dir = os.path.expanduser(self.config['ueransim']['config_path'])
-        
-        # Cache of running processes: bs_id -> Popen object
-        self.running_gnbs = {}
-        
-    def start_gnb(self, bs_id: int, config_filename: str):
-        """Starts a specific gNodeB process using UERANSIM"""
-        if os.name == 'nt':
-            logger.warning("Windows OS detected. Mocking start_gnb command.")
-            self.running_gnbs[bs_id] = "mock_process"
-            return True
-            
-        if bs_id in self.running_gnbs:
-            logger.info(f"gNB '{bs_id}' is already running.")
-            return True
-            
-        executable = os.path.join(self.bin_path, "nr-gnb")
-        cfg_path = os.path.join(self.config_dir, config_filename)
-        
-        if not os.path.exists(executable):
-            logger.error(f"Cannot find nr-gnb executable at {executable}")
-            return False
-            
-        cmd = [executable, "-c", cfg_path]
-        logger.info(f"Starting gNB {bs_id}: {' '.join(cmd)}")
-        
-        try:
-            # Run detached process
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.running_gnbs[bs_id] = proc
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start gNB {bs_id}: {e}")
-            return False
+    gNB and UE are managed independently so they can be started/stopped
+    in any order required by the simulation.
+    """
 
-    def stop_gnb(self, bs_id: int):
-        """Stops a specific running gNodeB"""
-        if os.name == 'nt':
-            logger.warning(f"Windows OS detected. Mocking stop_gnb command for {bs_id}.")
-            if bs_id in self.running_gnbs:
-                del self.running_gnbs[bs_id]
+    def __init__(self, compose_dir: str = "."):
+        """
+        Args:
+            compose_dir: Directory containing docker-compose.yaml.
+                         Defaults to current working directory.
+                         Override with the absolute path on your Linux host,
+                         e.g. "/home/user/AI-5g-project"
+        """
+        self.compose_dir = compose_dir
+        logger.info(f"UERANSIMController initialised (compose_dir={compose_dir})")
+
+    # ------------------------------------------------------------------
+    # gNB control
+    # ------------------------------------------------------------------
+
+    def start_gnb(self, bs_id: int = 0, config_filename: str = None) -> bool:
+        """
+        Start the gNB container.
+
+        Args:
+            bs_id:           Unused (kept for API compatibility with old controller).
+            config_filename: Unused (config is baked into the container image).
+
+        Returns:
+            True on success, False on failure.
+        """
+        if is_container_running(GNB_SERVICE):
+            logger.info(f"gNB container '{GNB_SERVICE}' is already running.")
             return True
-            
-        if bs_id not in self.running_gnbs:
-            logger.warning(f"gNB {bs_id} is not currently tracked as running.")
-            return False
-            
-        proc = self.running_gnbs[bs_id]
-        if isinstance(proc, subprocess.Popen):
-            logger.info(f"Terminating gNB {bs_id} (PID: {proc.pid})")
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        
-        del self.running_gnbs[bs_id]
-        return True
-        
+
+        logger.info(f"Starting gNB container: {GNB_SERVICE}")
+        result = run_docker_command(
+            ["docker", "compose", "up", "-d", GNB_SERVICE],
+            cwd=self.compose_dir,
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info(f"gNB container '{GNB_SERVICE}' started successfully.")
+        else:
+            logger.error(f"Failed to start gNB container '{GNB_SERVICE}'.")
+        return success
+
+    def stop_gnb(self, bs_id: int = 0) -> bool:
+        """
+        Stop the gNB container.
+
+        Args:
+            bs_id: Unused (kept for API compatibility).
+
+        Returns:
+            True on success, False on failure.
+        """
+        if not is_container_running(GNB_SERVICE):
+            logger.warning(f"gNB container '{GNB_SERVICE}' is not running.")
+            return True  # Already stopped — not an error
+
+        logger.info(f"Stopping gNB container: {GNB_SERVICE}")
+        result = run_docker_command(
+            ["docker", "compose", "stop", GNB_SERVICE],
+            cwd=self.compose_dir,
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info(f"gNB container '{GNB_SERVICE}' stopped.")
+        else:
+            logger.error(f"Failed to stop gNB container '{GNB_SERVICE}'.")
+        return success
+
+    # ------------------------------------------------------------------
+    # UE control
+    # ------------------------------------------------------------------
+
+    def start_ue(self) -> bool:
+        """
+        Start the UE container (nr-ue).
+
+        Returns:
+            True on success, False on failure.
+        """
+        if is_container_running(UE_SERVICE):
+            logger.info(f"UE container '{UE_SERVICE}' is already running.")
+            return True
+
+        logger.info(f"Starting UE container: {UE_SERVICE}")
+        result = run_docker_command(
+            ["docker", "compose", "up", "-d", UE_SERVICE],
+            cwd=self.compose_dir,
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info(f"UE container '{UE_SERVICE}' started successfully.")
+        else:
+            logger.error(f"Failed to start UE container '{UE_SERVICE}'.")
+        return success
+
+    def stop_ue(self) -> bool:
+        """
+        Stop the UE container.
+
+        Returns:
+            True on success, False on failure.
+        """
+        if not is_container_running(UE_SERVICE):
+            logger.warning(f"UE container '{UE_SERVICE}' is not running.")
+            return True  # Already stopped
+
+        logger.info(f"Stopping UE container: {UE_SERVICE}")
+        result = run_docker_command(
+            ["docker", "compose", "stop", UE_SERVICE],
+            cwd=self.compose_dir,
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info(f"UE container '{UE_SERVICE}' stopped.")
+        else:
+            logger.error(f"Failed to stop UE container '{UE_SERVICE}'.")
+        return success
+
+    # ------------------------------------------------------------------
+    # Status helpers
+    # ------------------------------------------------------------------
+
     def get_active_gnbs(self) -> List[int]:
-        """Returns list of active Base Station IDs."""
-        return list(self.running_gnbs.keys())
+        """
+        Returns [0] if the gNB container is running, [] otherwise.
+        (Kept as List[int] for API compatibility with old controller.)
+        """
+        return [0] if is_container_running(GNB_SERVICE) else []
+
+    def is_gnb_running(self) -> bool:
+        """Check if the gNB container is up."""
+        return is_container_running(GNB_SERVICE)
+
+    def is_ue_running(self) -> bool:
+        """Check if the UE container is up."""
+        return is_container_running(UE_SERVICE)
