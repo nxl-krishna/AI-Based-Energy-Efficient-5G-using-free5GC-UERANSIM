@@ -14,6 +14,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import logging
 import yaml
+import argparse
+import subprocess
 from pathlib import Path
 
 # Import custom modules
@@ -21,9 +23,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from traffic_monitoring.traffic_monitor import TrafficMonitor
 from ai_model.traffic_predictor import SimplePredictor, EnergyPredictor
+from ai_model.lstm_model import EnergyOptimizationAgent
 from decision_engine.decision_engine import DecisionEngine
 from base_station_control.bs_controller import BaseStationController, LoadBalancer
 from ueransim_integration.ueransim_controller import UERANSIMController
+from docker_utils import run_docker_command
 
 # Configure logging
 logging.basicConfig(
@@ -40,14 +44,17 @@ class SimulationRunner:
     Manages Docker-based UERANSIM gNB and UE containers.
     """
 
-    def __init__(self, config_file: str = None, compose_dir: str = "."):
+    def __init__(self, config_file: str = None, compose_dir: str = ".", mode: str = "collect"):
         """Initialize simulator with configuration.
 
         Args:
             config_file: Optional YAML config path.
             compose_dir: Directory containing docker-compose.yaml.
                          Set to the project root on your Linux host.
+            mode:        Run mode - "collect" or "optimize".
         """
+        self.mode = mode
+        self.compose_dir = compose_dir
 
         # Default configuration
         self.config = {
@@ -77,6 +84,17 @@ class SimulationRunner:
         self.decision_engine = DecisionEngine(num_bs=num_bs)
         self.controller      = BaseStationController(num_bs=num_bs)
 
+        # AI Agent (Decision Maker)
+        self.agent = EnergyOptimizationAgent(action_size=num_bs, max_bs=num_bs)
+        if self.mode == "optimize":
+            # Attempt to load pre-trained agent if exists
+            model_path = str(Path(__file__).parent.parent / 'data' / 'models' / 'agent.h5')
+            if Path(model_path).exists():
+                self.agent.load(model_path)
+                logger.info(f"Loaded pre-trained EnergyOptimizationAgent from {model_path}")
+            else:
+                logger.warning("No pre-trained agent found, acting randomly.")
+
         # Docker-based UERANSIM controller
         self.ueransim = UERANSIMController(compose_dir=compose_dir)
 
@@ -95,8 +113,8 @@ class SimulationRunner:
         """
         Run the simulation.
 
-        Starts gNB and UE Docker containers before the loop and stops
-        them cleanly on completion or error.
+        Starts the unified Free5GC/UERANSIM Docker compose environment before the loop
+        and stops it cleanly on completion or error.
 
         Args:
             duration_hours: How many hours to simulate.
@@ -105,13 +123,16 @@ class SimulationRunner:
         duration_sec = duration_hours * 3600
         time_step    = self.config['simulation'].get('time_step', 60)
 
-        logger.info(f"Starting simulation: {duration_hours} hours")
+        logger.info(f"Starting simulation in {self.mode.upper()} mode: {duration_hours} hours")
 
         # --- Start Docker containers ---
-        logger.info("Starting UERANSIM gNB container...")
-        self.ueransim.start_gnb()
-        logger.info("Starting UERANSIM UE container...")
-        self.ueransim.start_ue()
+        logger.info(f"Starting unified Free5GC + UERANSIM stack in {self.compose_dir}...")
+        try:
+            run_docker_command(["docker", "compose", "up", "-d"], cwd=self.compose_dir)
+            logger.info("Stack started successfully.")
+        except Exception as e:
+            logger.error(f"Failed to start Docker stack: {e}")
+            return
 
         steps = duration_sec // time_step
 
@@ -149,9 +170,11 @@ class SimulationRunner:
 
         finally:
             # --- Always stop containers, even on error ---
-            logger.info("Stopping UERANSIM containers...")
-            self.ueransim.stop_ue()
-            self.ueransim.stop_gnb()
+            logger.info("Stopping unified Free5GC + UERANSIM stack...")
+            try:
+                run_docker_command(["docker", "compose", "stop"], cwd=self.compose_dir)
+            except Exception as e:
+                logger.error(f"Failed to stop stack cleanly: {e}")
 
         logger.info("Simulation completed")
 
@@ -192,26 +215,48 @@ class SimulationRunner:
     def _make_decision(self, current_metric) -> dict:
         """Make ON/OFF decisions for base stations"""
         
-        # Get prediction
-        recent_data = np.array([m.active_users for m in self.results['metrics'][-24:]])
-        if len(recent_data) < 24:
-            recent_data = np.pad(recent_data, (24 - len(recent_data), 0))
-        
-        try:
-            prediction = self.predictor.predict_next_hours(num_hours=24)
-        except:
-            prediction = {
-                'peak_load': np.mean(recent_data) * 1.2,
-                'average_load': np.mean(recent_data)
-            }
-        
-        # Make decision
-        decision = self.decision_engine.make_decision(
-            traffic_prediction=prediction,
-            current_loads=current_metric.bs_loads,
-            bs_energy=current_metric.bs_energy
-        )
-        
+        if self.mode == "optimize":
+            # State vector: [UE, Throughput, CPU, Memory]
+            state = np.array([
+                current_metric.active_users,
+                current_metric.throughput_mbps,
+                current_metric.cpu_percent,
+                current_metric.memory_percent
+            ])
+            # Ask the RL Agent to choose how many BS should be active
+            active_bs_count = self.agent.act(state, is_training=False)
+            
+            # Map the integer active_bs_count to BS commands (1 to N)
+            bs_commands = {}
+            for bs_id in range(1, self.monitor.num_base_stations + 1):
+                bs_commands[bs_id] = "ON" if bs_id <= active_bs_count else "OFF"
+            
+            # Form dummy decision object
+            class AgentDecision:
+                def __init__(self, commands):
+                    self.bs_commands = commands
+            decision = AgentDecision(bs_commands)
+            
+        else:
+            # Baseline/Collect mode: use existing simple traffic prediction heuristic
+            recent_data = np.array([m.active_users for m in self.results['metrics'][-24:]])
+            if len(recent_data) < 24:
+                recent_data = np.pad(recent_data, (24 - len(recent_data), 0))
+            
+            try:
+                prediction = self.predictor.predict_next_hours(num_hours=24)
+            except:
+                prediction = {
+                    'peak_load': np.mean(recent_data) * 1.2,
+                    'average_load': np.mean(recent_data)
+                }
+            
+            decision = self.decision_engine.make_decision(
+                traffic_prediction=prediction,
+                current_loads=current_metric.bs_loads,
+                bs_energy=current_metric.bs_energy
+            )
+            
         logger.info(f"Decision made: {sum(1 for c in decision.bs_commands.values() if c == 'ON')} BS active")
         
         return decision
@@ -302,19 +347,38 @@ class SimulationRunner:
 
 def main():
     """Main entry point."""
+    parser = argparse.ArgumentParser(description="Run 5G Simulation")
+    parser.add_argument("--mode", type=str, default="collect", choices=["collect", "optimize", "train"],
+                        help="Run mode for the simulation/agent.")
+    parser.add_argument("--duration", type=int, default=24, help="Simulation duration in hours")
+    args = parser.parse_args()
 
     # compose_dir should point to where docker-compose.yaml lives on Linux.
     # On your Linux host: set COMPOSE_PROJECT_DIR env var, or edit this path.
     import os
     compose_dir = os.environ.get("COMPOSE_PROJECT_DIR", ".")
 
+    # If asking to train offline
+    if args.mode == "train":
+        logger.info("Initializing Agent for offline training...")
+        agent = EnergyOptimizationAgent()
+        csv_path = str(Path(__file__).parent.parent / 'data' / 'results' / 'traffic_metrics.csv')
+        agent.train_offline(csv_path)
+        
+        # Save model
+        out_dir = Path(__file__).parent.parent / 'data' / 'models'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        agent.save(str(out_dir / 'agent.h5'))
+        return
+
     simulator = SimulationRunner(
         config_file='../../config/simulation_config.yaml',
         compose_dir=compose_dir,
+        mode=args.mode
     )
 
     try:
-        simulator.run(duration_hours=24)
+        simulator.run(duration_hours=args.duration)
         simulator.print_summary()
     except Exception as e:
         logger.error(f"Simulation error: {e}")

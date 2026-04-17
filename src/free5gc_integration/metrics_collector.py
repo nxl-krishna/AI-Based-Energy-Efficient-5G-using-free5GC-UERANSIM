@@ -164,3 +164,4 @@ class Free5GCMetricsCollector:
 
         logger.debug(f"RAPL: {energy_joules:.4f} J over {sample_window_sec}s → {power_watts:.2f} W")
         return {"energy_joules": energy_joules, "power_watts": power_watts}
+
