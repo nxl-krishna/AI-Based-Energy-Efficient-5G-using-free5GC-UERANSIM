@@ -120,8 +120,7 @@ class BaseStationController:
                 
                 if elapsed >= state.transition_duration_sec:
                     # Transition complete
-                    if 'target_state' in self.__dict__:
-                        state.state = getattr(self, f'_transition_target_{bs_id}', "ON")
+                    state.state = getattr(self, f'_transition_target_{bs_id}', "ON")
                     state.transition_start_time = None
                     transition_complete[bs_id] = True
                     logger.info(f"BS {bs_id} transition complete")

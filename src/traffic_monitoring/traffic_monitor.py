@@ -228,22 +228,30 @@ class TrafficMonitor:
             energy_joules = (rapl_end - rapl_start) / 1_000_000.0  # µJ → J
             power_watts   = energy_joules / elapsed
         else:
-            # Fallback: RAPL unavailable (Windows / non-Intel)
-            energy_joules = 0.0
-            power_watts   = 0.0
+            # Fallback Option B: CPU TDP Scaling Model
+            # Simulating a typical processor (e.g. 15W idle, 65W Max TDP)
+            base_power_w = 15.0
+            max_tdp_w = 65.0
+            
+            power_watts = base_power_w + (cpu_pct / 100.0) * (max_tdp_w - base_power_w)
+            energy_joules = power_watts * elapsed
 
         total_users = ueransim_data["active_users"]
         bs_loads, bs_energy = self.calculate_bs_metrics(total_users, power_watts)
         active_bs = sum(1 for e in bs_energy.values() if e > 0)
 
+        aggregate_throughput = ueransim_data["total_data_mbps"]
+        packet_loss = ueransim_data["packet_loss_rate"]
+        effective_throughput = aggregate_throughput * (1.0 - packet_loss)
+
         metric = TrafficMetric(
             timestamp             = datetime.now(),
             active_users          = total_users,
-            total_data_mbps       = ueransim_data["total_data_mbps"],
+            total_data_mbps       = aggregate_throughput,
             average_latency_ms    = ueransim_data["average_latency_ms"],
-            throughput_mbps       = free5gc_data["throughput_mbps"],
-            packet_loss_rate      = ueransim_data["packet_loss_rate"],
-            energy_consumption_w  = power_watts,   # Real RAPL-derived watts
+            throughput_mbps       = effective_throughput,
+            packet_loss_rate      = packet_loss,
+            energy_consumption_w  = power_watts,   # Real RAPL/TDP-derived watts
             energy_joules         = energy_joules,
             cpu_percent           = cpu_pct,
             memory_percent        = mem_pct,

@@ -356,7 +356,7 @@ def main():
     # compose_dir should point to where docker-compose.yaml lives on Linux.
     # On your Linux host: set COMPOSE_PROJECT_DIR env var, or edit this path.
     import os
-    compose_dir = os.environ.get("COMPOSE_PROJECT_DIR", ".")
+    compose_dir = os.path.expanduser(os.environ.get("COMPOSE_PROJECT_DIR", "."))
 
     # If asking to train offline
     if args.mode == "train":

@@ -37,7 +37,7 @@ class UERANSIMController:
     in any order required by the simulation.
     """
 
-    def __init__(self, compose_dir: str = "."):
+    def __init__(self, compose_dir: str = None):
         """
         Args:
             compose_dir: Directory containing docker-compose.yaml.
@@ -45,8 +45,13 @@ class UERANSIMController:
                          Override with the absolute path on your Linux host,
                          e.g. "/home/user/AI-5g-project"
         """
-        self.compose_dir = compose_dir
-        logger.info(f"UERANSIMController initialised (compose_dir={compose_dir})")
+        if compose_dir is None or compose_dir == ".":
+            from docker_utils import COMPOSE_PROJECT_DIR
+            self.compose_dir = COMPOSE_PROJECT_DIR
+        else:
+            self.compose_dir = compose_dir
+            
+        logger.info(f"UERANSIMController initialised (compose_dir={self.compose_dir})")
 
     # ------------------------------------------------------------------
     # gNB control

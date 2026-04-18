@@ -14,10 +14,9 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Default docker compose project directory (where docker-compose.yaml lives)
-# Override by setting COMPOSE_PROJECT_DIR before importing, or pass explicitly.
+# Default docker compose project directory
 import os
-COMPOSE_PROJECT_DIR = os.environ.get("COMPOSE_PROJECT_DIR", ".")
+COMPOSE_PROJECT_DIR = os.path.expanduser(os.environ.get("COMPOSE_PROJECT_DIR", "."))
 
 
 def run_docker_command(cmd: List[str], cwd: str = None, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -56,21 +55,20 @@ def run_docker_command(cmd: List[str], cwd: str = None, timeout: int = 30) -> su
         raise
 
 
-def docker_exec(container: str, command: List[str], background: bool = False) -> Optional[subprocess.Popen]:
+def docker_exec(container: str, command: List[str], background: bool = False, cwd: str = None) -> Optional[subprocess.Popen]:
     """
-    Execute a command inside a running container.
+    Execute a command inside a running container using docker compose.
 
     Args:
-        container:  Container name, e.g. "ueransim-ue"
+        container:  Service name, e.g. "ueransim-ue" or "upf"
         command:    Command to run, e.g. ["ping", "-I", "uesimtun0", "8.8.8.8"]
         background: If True, returns a Popen handle (non-blocking).
                     If False, blocks until command completes and returns None.
-
-    Returns:
-        Popen handle if background=True, else None.
+        cwd:        Working directory containing docker-compose.yml
     """
-    full_cmd = ["docker", "exec", container] + command
-    logger.debug(f"docker exec [{container}]: {' '.join(command)}")
+    cwd = cwd or COMPOSE_PROJECT_DIR
+    full_cmd = ["docker", "compose", "exec", "-T", container] + command
+    logger.debug(f"docker compose exec [{container}]: {' '.join(command)}")
 
     if background:
         try:
@@ -78,6 +76,7 @@ def docker_exec(container: str, command: List[str], background: bool = False) ->
                 full_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                cwd=cwd
             )
             return proc
         except Exception as e:
@@ -90,6 +89,7 @@ def docker_exec(container: str, command: List[str], background: bool = False) ->
                 capture_output=True,
                 text=True,
                 timeout=30,
+                cwd=cwd
             )
             return result
         except Exception as e:
@@ -97,26 +97,22 @@ def docker_exec(container: str, command: List[str], background: bool = False) ->
             return None
 
 
-def is_container_running(container_name: str) -> bool:
+def is_container_running(container_name: str, cwd: str = None) -> bool:
     """
-    Check whether a container is currently running.
+    Check whether a service is currently running.
 
-    Uses `docker inspect` to query the container's running state.
-
-    Args:
-        container_name: Name of the container to check.
-
-    Returns:
-        True if running, False otherwise.
+    Uses `docker compose ps` to query the service's running state.
     """
+    cwd = cwd or COMPOSE_PROJECT_DIR
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
+            ["docker", "compose", "ps", "--services", "--filter", "status=running"],
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=10,
         )
-        return result.stdout.strip() == "true"
+        return container_name in result.stdout.splitlines()
     except Exception as e:
-        logger.error(f"Failed to inspect container '{container_name}': {e}")
+        logger.error(f"Failed to check if service '{container_name}' is running: {e}")
         return False
